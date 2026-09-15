@@ -20,6 +20,13 @@ def bar(done: int, total: int) -> str:
     return "[" + "#" * filled + " " * (BAR_WIDTH - filled) + "]"
 
 
+def name_of(arg: str | None) -> str:
+    """Resolve an explicit project name, or infer it from the cwd."""
+    if arg:
+        return store.resolve(arg)
+    return store.infer_name()
+
+
 def line(name: str, p: dict) -> str:
     steps = p["steps"]
     ptr = p.get("pointer", 0)
@@ -41,15 +48,30 @@ def cmd_new(args) -> int:
     return 0
 
 
+def find_status(tokens: list[str]) -> tuple[str | None, list[str]]:
+    """Find a status in the tokens (handles unquoted 'in progress')."""
+    for i in range(len(tokens)):
+        for span in (2, 1):
+            cand = " ".join(tokens[i : i + span])
+            if cand in store.STATUSES:
+                return cand, tokens[:i] + tokens[i + span :]
+    return None, tokens
+
+
 def cmd_status(args) -> int:
-    name = store.resolve(args.name)
-    store.set_status(name, args.status)
-    print(f"'{name}' status: {args.status}")
+    status, rest = find_status(args.tokens)
+    if status is None:
+        raise ProjError("missing status (" + "|".join(store.STATUSES) + ")")
+    if len(rest) > 1:
+        raise ProjError("unexpected extra arguments: " + " ".join(rest))
+    name = store.resolve(rest[0]) if rest else store.infer_name()
+    store.set_status(name, status)
+    print(f"'{name}' status: {status}")
     return 0
 
 
 def cmd_next(args) -> int:
-    name = store.resolve(args.name)
+    name = name_of(args.name)
     done, cur = store.next_step(name)
     print(f"'{name}': {CHECK} {done}  {ARROW}  {cur}")
     return 0
@@ -84,14 +106,26 @@ def cmd_add(args) -> int:
 
 
 def cmd_done(args) -> int:
-    name = store.resolve(args.name)
-    task = store.done_task(name, args.id)
+    tokens = args.tokens
+    tid = None
+    rest = []
+    for tok in tokens:
+        if tok.lstrip("-").isdigit():
+            if tid is not None:
+                raise ProjError("ambiguous: multiple task ids")
+            tid = int(tok)
+        else:
+            rest.append(tok)
+    if tid is None:
+        raise ProjError("missing task id")
+    name = store.resolve(rest[0]) if rest else store.infer_name()
+    task = store.done_task(name, tid)
     print(f"[{name}] #{task['id']} done: {task['title']}")
     return 0
 
 
 def cmd_tasks(args) -> int:
-    names = [store.resolve(args.name)] if args.name else store.all_names()
+    names = [name_of(args.name)] if args.name else store.all_names()
     printed = False
     for name in names:
         opens = store.open_tasks(store.load(name))
@@ -108,7 +142,7 @@ def cmd_tasks(args) -> int:
 
 
 def cmd_show(args) -> int:
-    name = store.resolve(args.name)
+    name = name_of(args.name)
     p = store.load(name)
     steps = p["steps"]
     ptr = p.get("pointer", 0)
@@ -150,12 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_new)
 
     p = sub.add_parser("status", help="set project status")
-    p.add_argument("name")
-    p.add_argument("status", choices=store.STATUSES)
+    p.add_argument(
+        "tokens",
+        nargs="+",
+        help="[project] <status> — status: " + " | ".join(store.STATUSES),
+    )
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("next", help="advance to the next step")
-    p.add_argument("name")
+    p.add_argument("name", nargs="?", help="project (default: inferred from cwd)")
     p.set_defaults(func=cmd_next)
 
     p = sub.add_parser("add", help="add a task (project inferred from cwd)")
@@ -167,16 +204,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_add)
 
     p = sub.add_parser("done", help="mark a task done")
-    p.add_argument("name")
-    p.add_argument("id", type=int)
+    p.add_argument(
+        "tokens",
+        nargs="+",
+        help="[project] <task-id> (project optional, inferred from cwd)",
+    )
     p.set_defaults(func=cmd_done)
 
     p = sub.add_parser("tasks", help="list open tasks")
-    p.add_argument("name", nargs="?")
+    p.add_argument("name", nargs="?", help="project (default: all projects)")
     p.set_defaults(func=cmd_tasks)
 
     p = sub.add_parser("show", help="show one project")
-    p.add_argument("name")
+    p.add_argument("name", nargs="?", help="project (default: inferred from cwd)")
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("list", help="global view (default)")
